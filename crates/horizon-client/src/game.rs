@@ -153,6 +153,7 @@ mod frames;
 #[cfg(feature = "friends")]
 mod friends;
 // Without Play with Friends: nothing shared, no Friends button (game/friends_off.rs).
+mod app_nap;
 #[cfg(test)]
 mod entity_inside_tests;
 #[cfg(not(feature = "friends"))]
@@ -17120,6 +17121,7 @@ pub fn run_with() -> Result<()> {
         // (horizon_threads::jobs) and other programs outnumber the cores, and a frame that gave its core up (in a GPU submit) waited
         // 10 to 200 ms to get one back.
         horizon_threads::favour_current();
+        app_nap::hold_off();
     }
     // A dedicated server too: vanilla's "Server Shutdown Thread" (`DedicatedServer.initServer`'s
     // shutdown hook) halts the server and saves its players and levels on SIGTERM, SIGINT or SIGHUP.
