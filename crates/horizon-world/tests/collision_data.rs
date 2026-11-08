@@ -234,6 +234,37 @@ fn canonical_identity_claims_require_exact_geometry_and_unique_exports() {
     assert!(CachedCollisionRegistry::from_nbt(&noncanonical_zero, &registry).is_err());
 }
 
+/// `Block.isFaceFull` of a cached collision shape: a full block's faces are all full,
+/// air's none; a state without a cached shape has to be asked in the world.
+#[test]
+fn cached_face_full_answers_only_for_cached_shapes() {
+    use horizon_core::geometry::Direction;
+    use horizon_world::block_collision::BlockCollisionRegistry;
+    use std::sync::Arc;
+    let (registry_tag, collision_tag) = fixture();
+    let registry = BlockRegistry::from_nbt(&registry_tag).unwrap();
+    let cached = Arc::new(CachedCollisionRegistry::from_nbt(&collision_tag, &registry).unwrap());
+    let collisions = BlockCollisionRegistry::new(cached).unwrap();
+    for direction in Direction::ALL {
+        assert_eq!(
+            collisions.cached_face_full(BlockStateId(0), direction),
+            Some(false)
+        );
+        assert_eq!(
+            collisions.cached_face_full(BlockStateId(1), direction),
+            Some(true)
+        );
+        assert_eq!(
+            collisions.cached_face_full(BlockStateId(2), direction),
+            None
+        );
+        assert_eq!(
+            collisions.cached_face_full(BlockStateId(3), direction),
+            None
+        );
+    }
+}
+
 #[test]
 fn registry_scan_binding_requires_complete_canonical_metadata() {
     use horizon_world::{

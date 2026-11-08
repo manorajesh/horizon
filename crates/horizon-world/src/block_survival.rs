@@ -598,6 +598,9 @@ impl<'r> BlockSurvivalRegistry<'r> {
         {
             return Ok(true);
         }
+        if let Some(full) = self.collision.cached_face_full(neighbor, face) {
+            return Ok(full);
+        }
         let shape = self
             .collision
             .collision_shape(world, neighbor, at)
@@ -774,13 +777,19 @@ impl<'r> BlockSurvivalRegistry<'r> {
                 if self.snow_override.contains(&neighbor) {
                     return Ok(true);
                 }
-                let shape = self
-                    .collision
-                    .collision_shape(world, neighbor, at)
-                    .map_err(SurvivalError::Collision)?;
-                Ok(SupportType::Full
-                    .is_supporting(&shape, Direction::Up)
-                    .map_err(|error| SurvivalError::Registry(invalid(error.to_string())))?
+                let full = match self.collision.cached_face_full(neighbor, Direction::Up) {
+                    Some(full) => full,
+                    None => {
+                        let shape = self
+                            .collision
+                            .collision_shape(world, neighbor, at)
+                            .map_err(SurvivalError::Collision)?;
+                        SupportType::Full
+                            .is_supporting(&shape, Direction::Up)
+                            .map_err(|error| SurvivalError::Registry(invalid(error.to_string())))?
+                    }
+                };
+                Ok(full
                     || (self.same_block(neighbor, state)
                         && self
                             .registry

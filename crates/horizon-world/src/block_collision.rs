@@ -2,6 +2,7 @@
 //! Context-sensitive families override the no-context cache explicitly.
 use crate::{
     block_collision_scan::CollisionBlock,
+    block_support::SupportType,
     collision::CachedCollisionRegistry,
     collision_context::CollisionContext,
     dynamic_support::{DynamicSupport, DynamicSupportError, DynamicSupportWorld},
@@ -80,6 +81,12 @@ pub struct BlockCollisionRegistry<'r> {
     dynamic: HashMap<BlockStateId, DynamicSupport>,
     contextual: HashMap<BlockStateId, ContextualRule>,
     scan_flags: Vec<u8>,
+    /// Per state with a cached shape, bit `1 << direction`: whether that face of
+    /// its no-context collision shape is full (`Block.isFaceFull`, which vanilla
+    /// memoizes per shape). Survival rules ask it for every neighbour they check,
+    /// so building, comparing and dropping shapes each time dominated sculk
+    /// patch generation. `None` for states without a cached shape.
+    full_faces: Vec<Option<u8>>,
     /// Piston and piston-head states for moving-piston collision; None in
     /// registries without pistons.
     pistons: Option<PistonBlockBindings<'r>>,
@@ -94,9 +101,25 @@ impl<'r> BlockCollisionRegistry<'r> {
         let mut dynamic = HashMap::new();
         let mut contextual = HashMap::new();
         let mut scan_flags = Vec::with_capacity(cached.registry().len());
+        let mut full_faces = Vec::with_capacity(cached.registry().len());
         for index in 0..cached.registry().len() {
             let id = BlockStateId(index as u32);
             let state = cached.registry().state(id).unwrap();
+            full_faces.push(match cached.cached_shape(id)? {
+                Some(shape) => {
+                    let mut mask = 0u8;
+                    for direction in Direction::ALL {
+                        if SupportType::Full
+                            .is_supporting(shape, direction)
+                            .map_err(|error| crate::compression::invalid(error.to_string()))?
+                        {
+                            mask |= 1 << direction as u8;
+                        }
+                    }
+                    Some(mask)
+                }
+                None => None,
+            });
             let large = cached.cached_shape(id)?.is_none_or(|shape| {
                 Axis::ALL
                     .into_iter()
@@ -131,8 +154,19 @@ impl<'r> BlockCollisionRegistry<'r> {
             dynamic,
             contextual,
             scan_flags,
+            full_faces,
             pistons,
         })
+    }
+    /// `Block.isFaceFull(state.getCollisionShape(level, pos), direction)` for a state
+    /// whose no-context shape is cached, as [`Self::collision_shape`] would give it;
+    /// `None` when the shape depends on the world (ask [`Self::collision_shape`]).
+    pub fn cached_face_full(&self, state: BlockStateId, direction: Direction) -> Option<bool> {
+        self.full_faces
+            .get(state.0 as usize)
+            .copied()
+            .flatten()
+            .map(|mask| mask & (1 << direction as u8) != 0)
     }
     pub fn registry(&self) -> &'r BlockRegistry {
         self.cached.registry()
