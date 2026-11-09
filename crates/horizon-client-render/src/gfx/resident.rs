@@ -383,7 +383,7 @@ fn in_frustum(
     Some(((origin + DVec3::splat(8.0)).length_squared(), min))
 }
 
-impl<T> Resident<T> {
+impl<T: Sync> Resident<T> {
     /// Appends the sections `in_view` and `reachable` to `out`, nearest
     /// first (ties by key, so the order never depends on storage), and the
     /// sections in the frustum of columns past the render distance that
@@ -400,9 +400,9 @@ impl<T> Resident<T> {
         &self,
         camera: DVec3,
         radius: i32,
-        frustum: &impl Cull,
-        reachable: impl Fn(SectionKey) -> bool,
-        beyond: impl Fn(i32, i32) -> bool,
+        frustum: &(impl Cull + Sync),
+        reachable: impl Fn(SectionKey) -> bool + Sync,
+        beyond: impl Fn(i32, i32) -> bool + Sync,
         out: &mut Vec<Visible>,
     ) {
         self.walk(camera, radius, frustum, reachable, beyond, false, out);
@@ -411,18 +411,73 @@ impl<T> Resident<T> {
     /// marked (`insert_marked`) when `marked_only_near`, in the same order: GPU
     /// culling's frames, where the GPU draws those. A column's box spans all of
     /// its sections either way, so both decide alike on those they share.
+    ///
+    /// Past a few hundred columns (render distance 12 and up) the columns are split into runs
+    /// walked at once on the frame helpers (`horizon_threads::frame_helpers`); the sort makes
+    /// the result the same either way.
     pub fn walk(
         &self,
         camera: DVec3,
         radius: i32,
+        frustum: &(impl Cull + Sync),
+        reachable: impl Fn(SectionKey) -> bool + Sync,
+        beyond: impl Fn(i32, i32) -> bool + Sync,
+        marked_only_near: bool,
+        out: &mut Vec<Visible>,
+    ) {
+        use horizon_threads::frame_helpers;
+        let parts = frame_helpers::runs_for(self.columns.len(), WALK_RUN);
+        if parts <= 1 {
+            self.walk_columns(
+                &self.columns,
+                camera,
+                radius,
+                frustum,
+                &reachable,
+                &beyond,
+                marked_only_near,
+                out,
+            );
+        } else {
+            let runs = frame_helpers::ranges(self.columns.len(), parts);
+            let found: Vec<std::sync::Mutex<Vec<Visible>>> = runs
+                .iter()
+                .map(|_| std::sync::Mutex::new(Vec::new()))
+                .collect();
+            frame_helpers::for_each_part(runs.len(), &|i| {
+                let mut part = found[i].lock().unwrap_or_else(|e| e.into_inner());
+                self.walk_columns(
+                    &self.columns[runs[i].clone()],
+                    camera,
+                    radius,
+                    frustum,
+                    &reachable,
+                    &beyond,
+                    marked_only_near,
+                    &mut part,
+                );
+            });
+            for part in found {
+                out.append(&mut part.into_inner().unwrap_or_else(|e| e.into_inner()));
+            }
+        }
+        out.sort_unstable_by_key(|v| (v.distance, v.key));
+    }
+    /// `walk`'s visit of `columns`, unsorted.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_columns(
+        &self,
+        columns: &[Column],
+        camera: DVec3,
+        radius: i32,
         frustum: &impl Cull,
-        reachable: impl Fn(SectionKey) -> bool,
-        beyond: impl Fn(i32, i32) -> bool,
+        reachable: &impl Fn(SectionKey) -> bool,
+        beyond: &impl Fn(i32, i32) -> bool,
         marked_only_near: bool,
         out: &mut Vec<Visible>,
     ) {
         let from = camera_column(camera);
-        for column in &self.columns {
+        for column in columns {
             let near = in_view_distance(from, radius, column.x, column.z);
             if !near && !beyond(column.x, column.z) {
                 continue;
@@ -491,9 +546,11 @@ impl<T> Resident<T> {
                 }
             }
         }
-        out.sort_unstable_by_key(|v| (v.distance, v.key));
     }
 }
+/// The fewest columns a walk's run takes: below this, waking the helpers costs more than
+/// the walk (render distance 12 has about 450 columns, 32 about 3300).
+const WALK_RUN: usize = 128;
 
 #[cfg(test)]
 mod tests {
