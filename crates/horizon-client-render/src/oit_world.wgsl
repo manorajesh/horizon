@@ -2,7 +2,7 @@
 // has the shared maths), appended to terrain.wgsl after oit.wgsl.
 // The terrain's translucent layer, once per stage.
 fn oit_terrain_color(in: TerrainOut) -> vec4<f32> {
-    var color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
+    var color = sprite(in.uv, out_layer(in) & 0x7fffu) * in.color;
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
     if color.a < OIT_ALPHA_CUTOUT { discard; }
     return color;

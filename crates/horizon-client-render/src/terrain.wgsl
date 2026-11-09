@@ -202,23 +202,42 @@ fn sprite_at(tiled: vec2<f32>, layer: u32, du: vec2<f32>, dv: vec2<f32>) -> vec4
 struct TerrainOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) @interpolate(flat) layer: u32,
+    // The sprite layer (low 16 bits: `& 0x7fff` and the opaque flag `0x8000`) and, above it,
+    // the fade code (`fade_code`, below 2^16); read through `out_layer` and `out_fade`. Packed
+    // with the other flat outputs into two words: each output a vertex writes is stored per
+    // vertex on a tile-based GPU (Apple's) and read back for every pixel, and the four of them
+    // as separate words cost 0.1 ms a frame in the benchmark's forest at render distance 32.
+    @location(1) @interpolate(flat) layer_fade: u32,
     @location(2) color: vec4<f32>,
     @location(3) spherical: f32,
     @location(4) cylindrical: f32,
-    // How the face shines in HDR output (mesher.rs's `EMISSION_BITS`): 0 not
-    // at all, 1 to 4 the tier with its bright parts, 5 to 8 the tier all over.
-    @location(5) @interpolate(flat) emission: u32,
+    // How the face shines in HDR output (mesher.rs's `EMISSION_BITS`, bits 0 to 3): 0 not
+    // at all, 1 to 4 the tier with its bright parts, 5 to 8 the tier all over; then the
+    // emissive layer (`out_emissive_layer`): bit 4 set when there is one, bit 5 its flag
+    // (`0x80000000`), from bit 6 its sprite layer.
+    @location(5) @interpolate(flat) emission_glow: u32,
     // HDR lighting: block and sky light, as levels 0 to 15.
     @location(11) scene: vec2<f32>,
-    @location(6) @interpolate(flat) fade: u32,
     // A distant tile's tile-relative position, for its fade (`faded`).
     @location(7) local: vec3<f32>,
     // terrain.vsh's chunkVisibility: the section's fade-in, from 16 blocks out.
     @location(8) visibility: f32,
     // The camera-relative height, for the water mirror's cut at the plane.
     @location(9) height: f32,
-    @location(10) @interpolate(flat) emissive_layer: u32,
+}
+fn out_layer(t: TerrainOut) -> u32 {
+    return t.layer_fade & 0xffffu;
+}
+fn out_fade(t: TerrainOut) -> u32 {
+    return t.layer_fade >> 16u;
+}
+fn out_emission(t: TerrainOut) -> u32 {
+    return t.emission_glow & 15u;
+}
+// The emissive variant's sprite layer with its flag in the top bit, `0xffffffff` for none.
+fn out_emissive_layer(t: TerrainOut) -> u32 {
+    if (t.emission_glow & 16u) == 0u { return 0xffffffffu; }
+    return (t.emission_glow >> 6u) | ((t.emission_glow & 32u) << 26u);
 }
 // Whether a fading tile or section leaves this pixel out (gfx/lod.rs's
 // `fade_code`, `fade_out_code`). It fades in, or out, chunk by chunk: each
@@ -566,14 +585,13 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     out.clip = fade_depth(globals.view_proj * vec4(pos, 1.0), w);
     out.local = position;
     out.uv = uv;
-    out.layer = layer;
-    out.emissive_layer = 0xffffffffu;
+    var glow = 0u;
     // The pairs are sorted by base layer: stop at the first past this one.
     let sprite_layer = layer & 0x7fffu;
     for (var i = 0u; i < min(globals.emissive_count.x, 128u); i++) {
         let pair = globals.emissive_layers[i];
         if pair.x == sprite_layer {
-            out.emissive_layer = pair.y;
+            glow = 16u | ((pair.y >> 31u) << 5u) | ((pair.y & 0x3ffffffu) << 6u);
             break;
         }
         if pair.x > sprite_layer {
@@ -586,11 +604,11 @@ fn terrain_vertex(position: vec3<f32>, uv: vec2<f32>, layer: u32, color: vec4<f3
     if globals.colored_count.x > 0u {
         out.color = vec4(min(out.color.rgb + color.rgb * native_colored_light(pos), vec3(1.0)), out.color.a);
     }
-    out.emission = 15u - (u32(round(color.a * 255.0)) & 15u);
+    out.emission_glow = (15u - (u32(round(color.a * 255.0)) & 15u)) | glow;
     out.height = pos.y;
     out.spherical = length(pos);
     out.cylindrical = max(length(pos.xz), abs(pos.y));
-    out.fade = fade_code(w);
+    out.layer_fade = (layer & 0xffffu) | (fade_code(w) << 16u);
     const CHUNK_FULLY_VISIBLE_RANGE: f32 = 16.0;
     out.visibility = mix(1.0, instance_visibility(w),
         clamp((length(pos) - CHUNK_FULLY_VISIBLE_RANGE) / CHUNK_FULLY_VISIBLE_RANGE, 0.0, 1.0));
@@ -628,7 +646,7 @@ fn hdr_mark(tier: u32, y: f32) -> f32 {
     if HDR_LIGHTING && globals.hdr_light.z != 0.0 {
         hdr_normal = normalize(cross(dpdy(in.local), dpdx(in.local)));
     }
-    let texel = sprite(in.uv, in.layer & 0x7fffu);
+    let texel = sprite(in.uv, out_layer(in) & 0x7fffu);
     var color = texel * in.color;
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
     return solid_finish(in, texel, color);
@@ -645,13 +663,13 @@ fn solid_color(in: TerrainOut) -> vec4<f32> {
     if HDR_LIGHTING && globals.hdr_light.z != 0.0 {
         hdr_normal = normalize(cross(dy, dx));
     }
-    if faded(in.fade, in.local, dx, dy) { discard; }
+    if faded(out_fade(in), in.local, dx, dy) { discard; }
     // Bit 15 of the layer marks opaque leaves (forceOpaque): no alpha cutout.
-    let texel = sprite(in.uv, in.layer & 0x7fffu);
+    let texel = sprite(in.uv, out_layer(in) & 0x7fffu);
     var color = texel * in.color;
     // terrain.fsh: the fade-in mixes toward the fog colour.
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
-    if color.a < 0.5 && (in.layer & 0x8000u) == 0u { discard; }
+    if color.a < 0.5 && (out_layer(in) & 0x8000u) == 0u { discard; }
     return solid_finish(in, texel, color);
 }
 // The rest of a solid pixel's colour once it is kept: emission and fog.
@@ -675,12 +693,12 @@ fn solid_finish_at(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>, du: vec2<
             linear_fog(in.cylindrical, globals.fog.z, globals.fog.w)) * globals.fog_color.a;
         emissive = hdr_scene_alpha(mix(hdr_scene(in.scene.x, in.scene.y, hdr_facing()),
             globals.hdr_light.y, fogged));
-        if in.emission > 0u {
+        if out_emission(in) > 0u {
             // A light source's own face shines as one or stays as drawn, without the lighting.
             emissive = 1.0;
-            let whole = in.emission > 4u;
-            let tier = select(in.emission, in.emission - 4u, whole);
-            let l = in.layer & 0x7fffu;
+            let whole = out_emission(in) > 4u;
+            let tier = select(out_emission(in), out_emission(in) - 4u, whole);
+            let l = out_layer(in) & 0x7fffu;
             let t = textureLoad(emission_thresholds, vec2(i32(l % SPRITE_SPLIT), i32(l / SPRITE_SPLIT)), 0);
             let y = brightness(texel.rgb);
             // All over means all over: the sprite's range is one frame's, and an animated sprite's
@@ -690,10 +708,10 @@ fn solid_finish_at(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>, du: vec2<
             }
         }
     }
-    if in.emissive_layer != 0xffffffffu {
+    if out_emissive_layer(in) != 0xffffffffu {
         // The high bit: an OptiFine overlay, drawn cutout (opaque where alpha >= 0.1).
-        var mask = sprite_at(in.uv, in.emissive_layer & 0x7fffffffu, du, dv);
-        if (in.emissive_layer & 0x80000000u) != 0u {
+        var mask = sprite_at(in.uv, out_emissive_layer(in) & 0x7fffffffu, du, dv);
+        if (out_emissive_layer(in) & 0x80000000u) != 0u {
             mask.a = select(0.0, 1.0, mask.a >= 0.1);
         }
         return apply_fog(vec4(mix(color.rgb, mask.rgb, mask.a), mix(emissive, hdr_mark(3u, 1.0), mask.a)), in.spherical, in.cylindrical);
@@ -707,7 +725,7 @@ fn solid_finish_at(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>, du: vec2<
     let dx = dpdx(in.local);
     let dy = dpdy(in.local);
     hdr_normal = normalize(cross(dy, dx));
-    if sprite(in.uv, in.layer & 0x7fffu).a < 0.6 { discard; }
+    if sprite(in.uv, out_layer(in) & 0x7fffu).a < 0.6 { discard; }
     let fogged = max(linear_fog(in.spherical, globals.fog.x, globals.fog.y),
         linear_fog(in.cylindrical, globals.fog.z, globals.fog.w)) * globals.fog_color.a;
     let scene = mix(hdr_scene(in.scene.x, in.scene.y, hdr_facing()), globals.hdr_light.y, fogged);
@@ -717,7 +735,7 @@ fn solid_finish_at(in: TerrainOut, texel: vec4<f32>, color: vec4<f32>, du: vec2<
 // layer drawn first in front (gfx.rs's water tiers): dithered, the faded-out
 // pixels showed the layer behind through the one in front, twice the water.
 @fragment fn fs_translucent(in: TerrainOut) -> @location(0) vec4<f32> {
-    var color = sprite(in.uv, in.layer & 0x7fffu) * in.color;
+    var color = sprite(in.uv, out_layer(in) & 0x7fffu) * in.color;
     color = mix(globals.fog_color * vec4(1.0, 1.0, 1.0, color.a), color, in.visibility);
     if color.a < 0.01 { discard; }
     return apply_fog(color, in.spherical, in.cylindrical);
