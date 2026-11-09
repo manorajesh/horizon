@@ -1048,7 +1048,7 @@ impl H {
                 )
             }
             H::FrameGeneration => {
-                g.frame_generation = step(&FrameGeneration::ALL, g.frame_generation, back)
+                g.frame_generation = step(FrameGeneration::choices(), g.frame_generation, back)
             }
             H::Hdr => g.hdr = !g.hdr,
             H::HdrLighting => g.hdr_lighting = !g.hdr_lighting,

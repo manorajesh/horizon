@@ -341,19 +341,36 @@ pub enum FrameGeneration {
     Off,
     /// AMD FidelityFX Super Resolution 3.1's frame interpolation, ported to WGSL.
     Fsr31,
+    /// Apple's MetalFX frame interpolation (macOS 26 and later, where the GPU supports it:
+    /// `metalfx_offered`); FSR 3.1's where it isn't.
+    MetalFx,
 }
 impl FrameGeneration {
-    pub const ALL: [FrameGeneration; 2] = [FrameGeneration::Off, FrameGeneration::Fsr31];
+    pub const ALL: [FrameGeneration; 3] = [
+        FrameGeneration::Off,
+        FrameGeneration::Fsr31,
+        FrameGeneration::MetalFx,
+    ];
+    /// The choices the settings step through: MetalFX only where it runs.
+    pub fn choices() -> &'static [FrameGeneration] {
+        if metalfx_offered() {
+            &Self::ALL
+        } else {
+            &Self::ALL[..2]
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             FrameGeneration::Off => "off",
             FrameGeneration::Fsr31 => "fsr3.1",
+            FrameGeneration::MetalFx => "metalfx",
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             FrameGeneration::Off => "Off",
             FrameGeneration::Fsr31 => "FSR 3.1",
+            FrameGeneration::MetalFx => "MetalFX",
         }
     }
     fn parse(s: &str) -> Self {
@@ -506,6 +523,16 @@ pub fn offer_hdr(on: bool) {
 }
 pub fn hdr_offered() -> bool {
     HDR_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static METALFX_OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether MetalFX frame interpolation runs on this device (macOS 26 and later, Metal, a GPU
+/// it supports): set when the renderer starts; Frame Generation offers it only then.
+pub fn offer_metalfx(on: bool) {
+    METALFX_OFFERED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+pub fn metalfx_offered() -> bool {
+    METALFX_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 static TRANSLUCENT_BATCHING_OFFERED: std::sync::atomic::AtomicBool =

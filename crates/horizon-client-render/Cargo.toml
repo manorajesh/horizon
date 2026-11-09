@@ -66,6 +66,10 @@ rustix = { version = "1", default-features = false, features = ["std", "time"] }
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# MetalFX frame interpolation (Frame Generation's MetalFX choice).
+horizon-metalfx = { path = "../horizon-metalfx" }
+
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 

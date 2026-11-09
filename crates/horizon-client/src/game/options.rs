@@ -561,9 +561,7 @@ impl Game<'_> {
                 s.horizon.taa,
                 s.horizon.upscaling.ratio(),
             );
-            r.set_frame_generation(
-                s.horizon.frame_generation != horizon_client::graphics::FrameGeneration::Off,
-            );
+            r.set_frame_generation(s.horizon.frame_generation);
             r.set_hdr_lighting(s.horizon.hdr_lighting);
             // Where it is offered (`Renderer::gpu_culling_offer`); unchanged, it does nothing.
             let _ = r.set_gpu_culling(s.horizon.gpu_culling);

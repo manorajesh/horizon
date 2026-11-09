@@ -1585,6 +1585,7 @@ dependencies = [
  "horizon-cosmetics",
  "horizon-hdr",
  "horizon-items",
+ "horizon-metalfx",
  "horizon-mod-api-gen",
  "horizon-narrator",
  "horizon-optifine",
@@ -1698,6 +1699,19 @@ name = "horizon-mcp"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "horizon-metalfx"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
+ "wgpu",
 ]
 
 [[package]]
