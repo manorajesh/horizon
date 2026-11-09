@@ -8069,7 +8069,7 @@ impl Renderer {
             }
         }
         self.gpu_frame = gpu_frame;
-        let reachable = &self.occlusion;
+        let graph = self.occlusion.graph();
         let cutout = &self.lod_cutout;
         // Sections fading out (`leave_section`) are past the render distance:
         // drawn there until they have, or they popped out at once.
@@ -8088,7 +8088,7 @@ impl Renderer {
                 camera,
                 radius,
                 &Frusta(view, mirror),
-                |k| !culling || reachable.contains(k),
+                |k| !culling || graph.is_none_or(|g| g.contains(k)),
                 |x, z| {
                     (!cutout.is_empty() && cutout.contains(&(x, z)))
                         || (!leaving.is_empty() && leaving.contains(&(x, z)))
@@ -8346,6 +8346,17 @@ impl Renderer {
         // Listed sections whose solid quads the pass draws: it counts them among the
         // sections it kept.
         let mut gpu_solid = 0;
+        // `Sides::visible_from` for every listed section and part, the costliest step of this
+        // loop: worked out at once on the frame helpers, in the visible order, and read back
+        // below as the loop would have computed it. GPU culling's frames, which skip some
+        // sections, compute their own.
+        let facing = (!gpu_frame).then(|| {
+            let sections = &self.sections;
+            FacingRuns::new(&visible, eye, mirror_low, |v| {
+                let s = sections.get(v.slot);
+                (&s.sides, parts(fade_code(s, &v.key) != 0))
+            })
+        });
         for (i, v) in visible.iter().enumerate() {
             let s = self.sections.get(v.slot);
             if gpu_frame
@@ -8367,14 +8378,22 @@ impl Renderer {
             let parts = parts(fade_code(s, &v.key) != 0);
             // Each part's (group, first draw, draws).
             let mut runs = [(0, 0, 0); 2];
-            for (run, &(group, part)) in runs.iter_mut().zip(parts) {
+            for (p, (run, &(group, part))) in runs.iter_mut().zip(parts).enumerate() {
                 let start = draws.len();
-                facing_runs_from(&s.sides, eye, mirror_low, v.origin, part, |first, quads| {
+                let mut emit = |first: u32, quads: u32| {
                     indices += quads * 6;
                     let base = s.solid_base() + first * 4;
                     draws.push([quads * 6, instances, 0, base, i as u32]);
                     pages.push((s.page, None));
-                });
+                };
+                match &facing {
+                    Some(facing) => {
+                        for &(first, quads) in facing.get(i, p) {
+                            emit(first, quads);
+                        }
+                    }
+                    None => facing_runs_from(&s.sides, eye, mirror_low, v.origin, part, &mut emit),
+                }
                 *run = (group, start, draws.len() - start);
             }
             let runs = &runs[..parts.len()];
@@ -12206,6 +12225,69 @@ fn shadow_runs(
 /// `origin`; all of them when there is no eye.
 fn facing_runs(sides: &Sides, eye: Option<Vec3>, origin: [f32; 3], draw: impl FnMut(u32, u32)) {
     facing_runs_from(sides, eye, None, origin, Quads::All, draw)
+}
+/// `facing_runs_from` for each of a frame's listed sections and each of its parts (at most
+/// two), in order: what the section loop of `Renderer::draw_frame` draws.
+struct FacingRuns {
+    /// Every (first quad, quads) run, section by section, part by part.
+    runs: Vec<(u32, u32)>,
+    /// Where section `i`'s part `p` ends in `runs`, at `2 * i + p`.
+    ends: Vec<usize>,
+}
+impl FacingRuns {
+    /// Sections per run of the split: below that, waking the helpers costs more.
+    const RUN: usize = 256;
+    fn new<'s>(
+        visible: &[resident::Visible],
+        eye: Option<Vec3>,
+        low: Option<f32>,
+        of: impl Fn(&resident::Visible) -> (&'s Sides, &'static [(u8, Quads)]) + Sync,
+    ) -> Self {
+        let one =
+            |visible: &[resident::Visible], runs: &mut Vec<(u32, u32)>, ends: &mut Vec<usize>| {
+                for v in visible {
+                    let (sides, parts) = of(v);
+                    for p in 0..2 {
+                        if let Some(&(_, part)) = parts.get(p) {
+                            facing_runs_from(sides, eye, low, v.origin, part, |first, quads| {
+                                runs.push((first, quads));
+                            });
+                        }
+                        ends.push(runs.len());
+                    }
+                }
+            };
+        use horizon_threads::frame_helpers;
+        let parts = frame_helpers::runs_for(visible.len(), Self::RUN);
+        let mut all = Self {
+            runs: Vec::new(),
+            ends: Vec::with_capacity(visible.len() * 2),
+        };
+        if parts <= 1 {
+            one(visible, &mut all.runs, &mut all.ends);
+            return all;
+        }
+        let split = frame_helpers::ranges(visible.len(), parts);
+        let found: Vec<std::sync::Mutex<(Vec<(u32, u32)>, Vec<usize>)>> =
+            split.iter().map(|_| Default::default()).collect();
+        frame_helpers::for_each_part(split.len(), &|k| {
+            let mut found = found[k].lock().unwrap_or_else(|e| e.into_inner());
+            let (runs, ends) = &mut *found;
+            one(&visible[split[k].clone()], runs, ends);
+        });
+        for part in found {
+            let (runs, ends) = part.into_inner().unwrap_or_else(|e| e.into_inner());
+            let offset = all.runs.len();
+            all.ends.extend(ends.into_iter().map(|end| end + offset));
+            all.runs.extend(runs);
+        }
+        all
+    }
+    fn get(&self, section: usize, part: usize) -> &[(u32, u32)] {
+        let k = 2 * section + part;
+        let start = if k == 0 { 0 } else { self.ends[k - 1] };
+        &self.runs[start..self.ends[k]]
+    }
 }
 /// `facing_runs` for the eye and, with `low`, every eye straight below it down to that
 /// camera-relative height (the water mirror's eye).

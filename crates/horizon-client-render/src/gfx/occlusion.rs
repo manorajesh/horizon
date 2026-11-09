@@ -117,7 +117,7 @@ enum Edit {
 /// One search's result over the box around the camera: vanilla's
 /// `GraphStorage.sectionToNodeMap`, as dense arrays.
 #[derive(Default)]
-struct Graph {
+pub(crate) struct Graph {
     from: SectionKey,
     radius: i32,
     /// The world: lowest block y and height in sections.
@@ -167,7 +167,7 @@ impl Graph {
             self.from.2 + column / side - self.radius,
         )
     }
-    fn contains(&self, key: SectionKey) -> bool {
+    pub(crate) fn contains(&self, key: SectionKey) -> bool {
         if let Some(i) = self.index(key) {
             self.directions[i] & REACHED != 0
         } else if (0..=self.sections).contains(&key.1)
@@ -689,8 +689,14 @@ impl Occlusion {
     /// Whether `key` is visible from the camera. Without a usable graph
     /// (before the first search lands, or with the camera somewhere the graph
     /// never reached) every section is.
+    #[cfg(test)]
     pub fn contains(&self, key: SectionKey) -> bool {
         self.graph.as_ref().is_none_or(|g| g.contains(key))
+    }
+    /// The last finished search, which [`Self::contains`] reads: shareable with the frame
+    /// helpers, as the rest (the worker's channels) is not.
+    pub(crate) fn graph(&self) -> Option<&Graph> {
+        self.graph.as_ref()
     }
     /// Whether the current graph knows that `key` is visible from
     /// `camera_section`. Unknown is returned when the graph is absent, was
