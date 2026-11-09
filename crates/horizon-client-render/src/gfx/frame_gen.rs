@@ -11,6 +11,15 @@ mod interpolation;
 mod motion;
 mod optical_flow;
 
+#[cfg(target_os = "macos")]
+use horizon_metalfx as metalfx;
+
+/// Whether MetalFX frame interpolation runs on `device` (`horizon_metalfx::supported`).
+#[cfg(target_os = "macos")]
+pub fn metalfx_supported(device: &wgpu::Device) -> bool {
+    metalfx::supported(device)
+}
+
 use glam::{DMat4, DVec3, Mat4};
 use std::{
     sync::{
@@ -45,6 +54,12 @@ fn debug() -> Option<&'static str> {
 
 pub struct FrameGen {
     pub on: bool,
+    /// MetalFX's interpolation instead of FSR 3.1's (only where it runs: the renderer asks
+    /// for it only then; where it can't be made, FSR 3.1's still runs).
+    pub metalfx: bool,
+    /// MetalFX's interpolator and a binding of its output (`Post::finish_with`).
+    #[cfg(target_os = "macos")]
+    metalfx_gpu: Option<(metalfx::Interpolator, wgpu::BindGroup)>,
     /// The present thread failed to show a frame (or died): until the renderer has
     /// acquired a frame itself, the normal path runs and handles the surface.
     pub paused: bool,
@@ -104,6 +119,9 @@ impl FrameGen {
     pub fn new() -> Self {
         Self {
             on: false,
+            metalfx: false,
+            #[cfg(target_os = "macos")]
+            metalfx_gpu: None,
             paused: false,
             gpu: None,
             presenter: None,
@@ -286,6 +304,10 @@ impl FrameGen {
     /// Copy the world (`world`) onto `screen` for the real frame, and draw the made
     /// frame's world onto `generated`. Returns false when there is no made frame (the
     /// first after a reset): `generated` then holds this frame's world too.
+    ///
+    /// `split` submits what `encoder` holds and leaves a new encoder in its place, with
+    /// whatever the renderer must close first (its staging buffers): MetalFX's interpolation
+    /// runs between the two submissions. FSR 3.1's never calls it.
     #[allow(clippy::too_many_arguments)]
     pub fn generate(
         &mut self,
@@ -296,6 +318,7 @@ impl FrameGen {
         screen: &wgpu::TextureView,
         generated: &wgpu::TextureView,
         camera: &Camera,
+        split: &mut dyn FnMut(&mut wgpu::CommandEncoder),
     ) -> bool {
         let gpu = self.gpu.as_mut().expect("world() ran this frame");
         post.finish_with(encoder, screen, &gpu.world_group, None);
@@ -315,6 +338,58 @@ impl FrameGen {
                 camera.view_proj,
                 reproject * camera.view_proj,
             );
+        #[cfg(target_os = "macos")]
+        if self.metalfx {
+            let format = gpu.world.texture().format();
+            if self
+                .metalfx_gpu
+                .as_ref()
+                .is_none_or(|(fx, _)| !fx.fits(gpu.size, camera.render_size, format))
+            {
+                self.metalfx_gpu = None;
+                self.metalfx_gpu =
+                    metalfx::Interpolator::new(device, gpu.size, camera.render_size, format).map(
+                        |fx| {
+                            let group = post.bind(device, fx.output());
+                            (fx, group)
+                        },
+                    );
+                if self.metalfx_gpu.is_none() {
+                    log::warn!(
+                        "Horizon renderer: MetalFX frame interpolation unavailable for {format:?}; using FSR 3.1"
+                    );
+                    self.metalfx = false;
+                }
+            }
+            if let Some((fx, group)) = &mut self.metalfx_gpu {
+                let made = fx.interpolate(
+                    device,
+                    queue,
+                    encoder,
+                    &metalfx::Frame {
+                        color: gpu.world.texture(),
+                        depth: &camera.depth,
+                        object_motion: &object_motion,
+                        reproject,
+                        render_size: camera.render_size,
+                        jitter: camera.jitter,
+                        near: camera.near,
+                        far: camera.far,
+                        fov_y: camera.fov_y,
+                        delta: self.interval.as_secs_f32(),
+                        reset,
+                    },
+                    split,
+                );
+                gpu.reset = false;
+                let source = if made { &*group } else { &gpu.world_group };
+                post.finish_with(encoder, generated, source, None);
+                return made;
+            }
+        }
+        // Only MetalFX's interpolation splits the frame.
+        #[cfg(not(target_os = "macos"))]
+        let _ = split;
         gpu.flow.dispatch(device, queue, encoder, &gpu.world, reset);
         gpu.interpolation.dispatch(
             device,

@@ -6,6 +6,7 @@ members = [
     "crates/horizon-narrator",
     "crates/horizon-threads",
     "crates/horizon-hdr",
+    "crates/horizon-metalfx",
     "crates/horizon-world",
     "crates/horizon-client",
     "crates/horizon-client-lib",

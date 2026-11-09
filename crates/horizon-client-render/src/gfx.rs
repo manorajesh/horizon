@@ -4587,6 +4587,8 @@ impl Renderer {
                 .contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION);
         let batchable = translucent_batchable(&adapter.get_info(), multi_draw);
         crate::graphics::offer_translucent_batching(batchable);
+        #[cfg(target_os = "macos")]
+        crate::graphics::offer_metalfx(frame_gen::metalfx_supported(&device));
         let translucent_batching = batchable && translucent_batching;
         let gpu_culling_offer = gpu_culling::offer(
             &adapter.get_info(),
@@ -6582,12 +6584,17 @@ impl Renderer {
     pub fn frame_generation_share(&self) -> Option<f32> {
         self.frame_gen.made_share
     }
-    /// Frame generation on or off (FSR 3.1's frame interpolation).
-    pub fn set_frame_generation(&mut self, on: bool) {
+    /// Frame generation: off, FSR 3.1's frame interpolation, or MetalFX's where it runs
+    /// (FSR 3.1's elsewhere).
+    pub fn set_frame_generation(&mut self, mode: crate::graphics::FrameGeneration) {
+        use crate::graphics::FrameGeneration;
+        let on = mode != FrameGeneration::Off;
         if !on {
             self.frame_gen.stop();
         }
         self.frame_gen.on = on;
+        self.frame_gen.metalfx =
+            mode == FrameGeneration::MetalFx && crate::graphics::metalfx_offered();
     }
     /// `upscale`: output pixels per rendered pixel, for TAA to rebuild (1: native).
     pub fn set_world_post(&mut self, scale: f32, antialias: bool, taa: bool, upscale: f32) {
@@ -11027,6 +11034,23 @@ impl Renderer {
                 format: Some(self.config.format.remove_srgb_suffix()),
                 ..Default::default()
             });
+            let (uploads, section_uploads) = (&mut self.uploads, &mut self.section_uploads);
+            let (device, queue) = (&self.device, &self.queue);
+            // MetalFX's interpolation runs between two submissions: the frame so far, with
+            // its staging buffers closed, then the rest in a new encoder.
+            let mut split = |encoder: &mut wgpu::CommandEncoder| {
+                uploads.finish(encoder);
+                if has_section_copies {
+                    section_uploads.finish(encoder);
+                }
+                let before = std::mem::replace(
+                    encoder,
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Frame after MetalFX"),
+                    }),
+                );
+                queue.submit([before.finish()]);
+            };
             fg_made = self.frame_gen.generate(
                 &self.device,
                 &self.queue,
@@ -11035,6 +11059,7 @@ impl Renderer {
                 &view_target,
                 &generated_view,
                 &camera,
+                &mut split,
             );
             if fg_made {
                 let overlay = Overlay {
