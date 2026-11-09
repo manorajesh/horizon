@@ -6584,6 +6584,10 @@ impl Renderer {
     pub fn frame_generation_share(&self) -> Option<f32> {
         self.frame_gen.made_share
     }
+    /// Which interpolation makes the frames (`FrameGen::engine`).
+    pub fn frame_generation_engine(&self) -> &'static str {
+        self.frame_gen.engine()
+    }
     /// Frame generation: off, FSR 3.1's frame interpolation, or MetalFX's where it runs
     /// (FSR 3.1's elsewhere).
     pub fn set_frame_generation(&mut self, mode: crate::graphics::FrameGeneration) {

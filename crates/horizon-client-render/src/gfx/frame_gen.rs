@@ -309,6 +309,16 @@ impl FrameGen {
     /// whatever the renderer must close first (its staging buffers): MetalFX's interpolation
     /// runs between the two submissions. FSR 3.1's never calls it.
     #[allow(clippy::too_many_arguments)]
+    /// The interpolation making frames, as the F3 screen names it: MetalFX's once its
+    /// interpolator runs, FSR 3.1's otherwise.
+    pub fn engine(&self) -> &'static str {
+        #[cfg(target_os = "macos")]
+        if self.metalfx && self.metalfx_gpu.is_some() {
+            return "MetalFX";
+        }
+        "FSR 3.1"
+    }
+
     pub fn generate(
         &mut self,
         device: &wgpu::Device,
